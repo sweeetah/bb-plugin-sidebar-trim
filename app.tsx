@@ -1,9 +1,10 @@
 // Sidebar Trim — hide older sidebar threads without archiving them.
 //
-// Desktop: native BB list + CSS :has stylesheet (overlay).
-// Compact/iOS: experimental_threadList renders only visible rows — no
-// display:none. That is the path that stays smooth on TestFlight.
-// Expand/collapse is instant (no row motion).
+// Desktop: native BB list + CSS :has stylesheet (overlay) with max-height
+// reveal/collapse for the "show older" chevron.
+// Compact/iOS: experimental_threadList renders a filtered list — no
+// display:none (that path flickered WKWebView). Expand/collapse uses a
+// CSS grid accordion so rows below ride the reflow.
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   definePluginApp,
@@ -22,12 +23,13 @@ import {
   mountExpandDelegation,
   syncExpandButtons,
 } from "./lib/expandButtons";
-import { createScrollIdleGate, isIosLike } from "./lib/platform";
+import { createScrollIdleGate } from "./lib/platform";
 import { readExpanded, writeExpanded } from "./lib/storage";
 import {
   applyHideStylesheet,
   clearHideStylesheet,
   hiddenIdsFromDecision,
+  managedIdsFromDecision,
 } from "./lib/stylesheet";
 import {
   computeTrimDecision,
@@ -35,37 +37,12 @@ import {
   DEFAULT_WORKSPACE_LIMIT,
   type TrimGroupKey,
 } from "./lib/trim";
+import { useCompactViewport } from "./lib/viewport";
 
 function parseLimit(value: unknown, fallback: number): number {
   const n = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(n)) return fallback;
   return Math.max(1, Math.min(500, Math.floor(n)));
-}
-
-/** True when the phone threadList path owns trimming — overlay must stay idle. */
-function useCompactViewport(): boolean {
-  const [compact, setCompact] = useState(() => {
-    if (typeof window === "undefined") return false;
-    return (
-      window.matchMedia("(max-width: 767px)").matches &&
-      (window.matchMedia("(pointer: coarse)").matches || isIosLike())
-    );
-  });
-  useEffect(() => {
-    const width = window.matchMedia("(max-width: 767px)");
-    const coarse = window.matchMedia("(pointer: coarse)");
-    const sync = () => {
-      setCompact(width.matches && (coarse.matches || isIosLike()));
-    };
-    sync();
-    width.addEventListener("change", sync);
-    coarse.addEventListener("change", sync);
-    return () => {
-      width.removeEventListener("change", sync);
-      coarse.removeEventListener("change", sync);
-    };
-  }, []);
-  return compact;
 }
 
 function SidebarTrimOverlay() {
@@ -115,6 +92,11 @@ function SidebarTrimOverlay() {
     if (status !== "ready") return new Set<string>();
     return hiddenIdsFromDecision(threads, decision, activeThreadId);
   }, [activeThreadId, decision, status, threads]);
+
+  const managedIds = useMemo(() => {
+    if (status !== "ready") return new Set<string>();
+    return managedIdsFromDecision(threads, decision);
+  }, [decision, status, threads]);
 
   const buttonFingerprint = useMemo(
     () => expandFingerprint(decision.expandableGroups, expandedGroups),
@@ -171,11 +153,11 @@ function SidebarTrimOverlay() {
         clearHideStylesheet();
         return;
       }
-      applyHideStylesheet(hiddenIds);
+      applyHideStylesheet(managedIds, hiddenIds);
     };
     if (gate) gate.run(apply);
     else apply();
-  }, [compact, hiddenIds, status]);
+  }, [compact, hiddenIds, managedIds, status]);
 
   useEffect(() => {
     if (compact) return;
@@ -208,10 +190,10 @@ function SidebarTrimOverlay() {
 function LimitsHelp() {
   return (
     <p style={{ margin: 0, fontSize: 14, opacity: 0.8 }}>
-      Older threads stay available — nothing is archived. On iPhone, Trim
-      replaces the sidebar list with a filtered list (no hidden rows). On
-      desktop it keeps BB’s native list. If the phone list looks untrimmed, open
-      Settings → Appearance and set the sidebar thread list to “Sidebar Trim”.
+      Older threads stay available — nothing is archived. Trim keeps BB’s native
+      sidebar (with project/workspace grouping) and only hides older rows on
+      desktop. Prefer Settings → Appearance → Sidebar thread list → Built-in so
+      phones always show the full native list.
     </p>
   );
 }
