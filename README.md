@@ -13,9 +13,12 @@ Limits are configurable in the plugin settings.
 
 ## How it works
 
-| Surface | Mechanism |
-|---------|-----------|
-| **iPhone / compact** | `experimental_threadList` renders a **filtered** list — older threads are never mounted. This avoids iOS WKWebView flicker from `display:none` / sticky stacks. |
-| **Desktop** | Native BB list + a CSS `:has()` stylesheet (and header expand chevrons). |
+Both desktop and phone use the same mechanism: BB's native list plus a CSS
+`:has()` stylesheet that collapses older rows (`max-height`/`opacity`, never
+`display:none`) and injects the expand chevrons into the section headers.
 
-If the phone sidebar still looks like the full BB list, set **Settings → Appearance → Sidebar thread list** to **Sidebar Trim**.
+Keeping the native list means project grouping, nested threads, hover actions
+and drag-reorder stay BB's on every surface.
+
+Leave **Settings → Appearance → Sidebar thread list** on **Built-in** — Trim
+works as an overlay and does not replace the list.

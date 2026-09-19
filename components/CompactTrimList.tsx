@@ -21,6 +21,8 @@ import {
   DEFAULT_GENERAL_LIMIT,
   DEFAULT_WORKSPACE_LIMIT,
   groupKeyFor,
+  selectGroupVisibility,
+  sortKey,
   type TrimGroupKey,
 } from "../lib/trim";
 
@@ -34,47 +36,32 @@ function threadTitle(thread: PluginSidebarThread): string {
   return thread.title?.trim() || thread.titleFallback?.trim() || "Untitled";
 }
 
-function sortKey(thread: PluginSidebarThread): number {
-  return Math.max(thread.latestAttentionAt, thread.updatedAt, thread.createdAt);
-}
-
-function hasAttention(thread: PluginSidebarThread): boolean {
-  return (
-    thread.isUnread ||
-    thread.hasPendingInteraction ||
-    thread.indicator !== "none" ||
-    thread.activity.workflows > 0 ||
-    thread.activity.backgroundAgents > 0 ||
-    thread.activity.backgroundCommands > 0 ||
-    thread.activity.planMode > 0 ||
-    thread.activity.goals > 0
-  );
-}
-
 /**
  * Split a group into the always-visible head and the accordion tail.
  * Tail stays mounted so expand/collapse can animate height instead of
  * mounting/unmounting (which jumps everything below).
+ *
+ * The *decision* of what belongs in the head is not made here — it is
+ * `selectGroupVisibility` in lib/trim.ts, the same call the CSS overlay makes.
+ * This file used to carry its own `sortKey`, its own `hasAttention` and its
+ * own copy of the slice, and they had already drifted from the overlay's: two
+ * surfaces quietly disagreeing about what the "24" in Settings means is a bug
+ * waiting for whichever one the user happens to be looking at. All that is
+ * left here is the display ordering, which genuinely is this list's business.
  */
 function splitHeadTail(
   members: readonly PluginSidebarThread[],
   limit: number,
   activeThreadId: string | null,
 ): { head: PluginSidebarThread[]; tail: PluginSidebarThread[] } {
+  const { visibleIds } = selectGroupVisibility({
+    members,
+    limit,
+    activeThreadId,
+  });
   const ranked = [...members].sort((a, b) => sortKey(b) - sortKey(a));
-  const headIds = new Set<string>();
-  for (const thread of ranked.slice(0, limit)) headIds.add(thread.id);
-  for (const thread of members) {
-    if (
-      thread.isPinned ||
-      thread.id === activeThreadId ||
-      hasAttention(thread)
-    ) {
-      headIds.add(thread.id);
-    }
-  }
-  const head = ranked.filter((thread) => headIds.has(thread.id));
-  const tail = ranked.filter((thread) => !headIds.has(thread.id));
+  const head = ranked.filter((thread) => visibleIds.has(thread.id));
+  const tail = ranked.filter((thread) => !visibleIds.has(thread.id));
   return { head, tail };
 }
 
@@ -151,7 +138,7 @@ function Chevron({ open }: { open: boolean }) {
         transform: open ? "rotate(90deg)" : "rotate(0deg)",
         transition: reduced
           ? undefined
-          : `transform ${motion.duration.chevron}ms ${motion.ease.chevron}`,
+          : `transform ${motion.duration.chevronTrim}ms ${motion.ease.bounce}`,
       }}
     >
       <path d="m9 18 6-6-6-6" />
@@ -280,15 +267,18 @@ function Accordion({
   const duration = open
     ? motion.duration.revealMax
     : motion.duration.collapseMax;
-  const ease = open ? motion.ease.bounce : motion.ease.exit;
+  const ease = open ? motion.ease.enter : motion.ease.exit;
   const fadeMs = open
     ? motion.duration.revealFade
     : motion.duration.collapseFade;
   const fadeEase = open ? motion.ease.fade : motion.ease.exit;
-  const transformEase = open ? motion.ease.bounce : motion.ease.exit;
+  // Rows never overshoot; the chevron is the only thing in this plugin that
+  // does (see lib/motion.ts). Content settles after the box on the way in and
+  // leads it on the way out.
+  const transformEase = open ? motion.ease.shift : motion.ease.exit;
   const transformMs = open
-    ? motion.duration.revealMax
-    : motion.duration.collapseMax;
+    ? motion.duration.revealShift
+    : motion.duration.collapseShift;
 
   return (
     <div
@@ -307,8 +297,8 @@ function Accordion({
           minHeight: 0,
           opacity: open ? 1 : 0,
           transform: open
-            ? "translateY(0) scale(1)"
-            : `translateY(-${motion.distance.rowLift}px) scale(0.97)`,
+            ? "translateY(0)"
+            : `translateY(-${motion.distance.rowLift}px)`,
           transition: tweening
             ? `opacity ${fadeMs}ms ${fadeEase}, transform ${transformMs}ms ${transformEase}`
             : "none",

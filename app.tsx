@@ -1,10 +1,15 @@
 // Sidebar Trim — hide older sidebar threads without archiving them.
 //
-// Desktop: native BB list + CSS :has stylesheet (overlay) with max-height
-// reveal/collapse for the "show older" chevron.
-// Compact/iOS: experimental_threadList renders a filtered list — no
-// display:none (that path flickered WKWebView). Expand/collapse uses a
-// CSS grid accordion so rows below ride the reflow.
+// One mechanism on both surfaces: BB's native list plus a CSS :has stylesheet
+// (overlay) that collapses older rows with max-height/opacity and injects the
+// "show older" chevron. Keeping the native list means project grouping,
+// nested threads, hover actions and drag-reorder are BB's, not ours, on
+// phones as well as desktop.
+//
+// `display:none` is the thing to stay away from on windowed sidebar rows —
+// that is what blanked the list in iOS WKWebView — so no code path uses it on
+// compact. components/CompactTrimList.tsx holds an unused React
+// reimplementation of the list kept for reference.
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   definePluginApp,
@@ -113,14 +118,14 @@ function SidebarTrimOverlay() {
     });
   };
 
+  // The overlay now runs on the mobile drawer too. It used to switch itself
+  // off there, which left phones with no trimming at all once the compact
+  // thread-list slot was stubbed out — the sidebar was all-or-nothing. The
+  // original hazard was `display:none` on windowed rows blanking the list in
+  // iOS WKWebView; the animated path never used it, and the reduced-motion
+  // path no longer does on compact either (see lib/stylesheet.ts). Rows are
+  // collapsed by max-height/opacity and stay in the layout tree.
   useEffect(() => {
-    if (compact) {
-      clearHideStylesheet();
-      const root = findSidebarRoot();
-      if (root) clearExpandButtons(root);
-      return;
-    }
-
     const gate = createScrollIdleGate({
       getScrollTarget: () => {
         const root = findSidebarRoot();
@@ -143,24 +148,22 @@ function SidebarTrimOverlay() {
       if (current) clearExpandButtons(current);
       lastButtonFingerprint.current = "";
     };
-  }, [compact]);
+  }, []);
 
   useEffect(() => {
-    if (compact) return;
     const gate = scrollGateRef.current;
     const apply = () => {
       if (status !== "ready") {
         clearHideStylesheet();
         return;
       }
-      applyHideStylesheet(managedIds, hiddenIds);
+      applyHideStylesheet(managedIds, hiddenIds, compact);
     };
-    if (gate) gate.run(apply);
+    if (gate) gate.run("rows", apply);
     else apply();
   }, [compact, hiddenIds, managedIds, status]);
 
   useEffect(() => {
-    if (compact) return;
     if (status !== "ready") {
       const root = findSidebarRoot();
       if (root) clearExpandButtons(root);
@@ -180,9 +183,9 @@ function SidebarTrimOverlay() {
       });
       lastButtonFingerprint.current = buttonFingerprint;
     };
-    if (gate) gate.run(apply);
+    if (gate) gate.run("buttons", apply);
     else apply();
-  }, [buttonFingerprint, compact, decision.expandableGroups, status]);
+  }, [buttonFingerprint, decision.expandableGroups, status]);
 
   return null;
 }
@@ -191,9 +194,9 @@ function LimitsHelp() {
   return (
     <p style={{ margin: 0, fontSize: 14, opacity: 0.8 }}>
       Older threads stay available — nothing is archived. Trim keeps BB’s native
-      sidebar (with project/workspace grouping) and only hides older rows on
-      desktop. Prefer Settings → Appearance → Sidebar thread list → Built-in so
-      phones always show the full native list.
+      sidebar (with project/workspace grouping) on every surface and only hides
+      older rows, on desktop and on phones alike. Leave Settings → Appearance →
+      Sidebar thread list on Built-in — Trim does not need to replace the list.
     </p>
   );
 }
