@@ -26,6 +26,40 @@ export function findSidebarRoot(): HTMLElement | null {
   );
 }
 
+/**
+ * Thread ids whose row is on screen right now — in the DOM *and* taller than
+ * zero.
+ *
+ * Both halves matter, and they are two different absences. A trimmed row that
+ * BB has realized sits in the DOM at `max-height: 0`; a trimmed row it has not
+ * realized is a `display:none` placeholder with no row at all. Neither is
+ * drawn, and the caller (the mount entrance in lib/stylesheet.ts) has to treat
+ * them alike: "not drawn yet" is the whole question it is asking.
+ *
+ * Measured with the fix in place: tapping one project chevron drew 9 rows the
+ * plugin had been hiding *and* 3 rows of the same group that the plugin was not
+ * hiding at all — rows BB's virtualizer had simply never built, sitting on
+ * screen as blank reserved space. Asking "which rows of this group were
+ * hidden" would have animated 9 and popped 3, in one block, in view. Asking
+ * "which rows of this group are not drawn" gets all 12.
+ *
+ * One forced layout per expand, on the ~25 anchors the virtualizer keeps in the
+ * DOM. It runs on a deliberate tap, in the same task that is already rewriting
+ * two stylesheets.
+ */
+export function paintedThreadIds(root: ParentNode): Set<string> {
+  const painted = new Set<string>();
+  for (const el of Array.from(
+    root.querySelectorAll<HTMLElement>("[data-sidebar-thread-id]"),
+  )) {
+    const id = el.getAttribute("data-sidebar-thread-id");
+    if (!id) continue;
+    const row = el.closest<HTMLElement>(HOVER_ROW) ?? el;
+    if (row.getBoundingClientRect().height > 0.5) painted.add(id);
+  }
+  return painted;
+}
+
 export function findSidebarScrollTarget(root: HTMLElement): HTMLElement {
   return (
     root.querySelector<HTMLElement>('[data-sidebar="content"]') ?? root

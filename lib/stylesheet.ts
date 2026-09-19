@@ -16,7 +16,26 @@ import type { TrimDecision } from "./trim";
  */
 const STATIC_STYLE_ID = "bb-plugin-sidebar-trim-style";
 const ROWS_STYLE_ID = "bb-plugin-sidebar-trim-rows";
+/**
+ * A third tag, for the same reason there is a second one — and then one more.
+ *
+ * The mount entrance (see `buildRowEntranceRule`) is a CSS animation, so unlike
+ * every other rule this file emits it is *destroyed* by a re-parse: dropping a
+ * style element's CSSOM sheet takes the running animation with it, exactly as
+ * the chevron's rotate used to be torn out mid-flight. The rows sheet is
+ * rewritten whenever the thread list changes, and a thread list that changes
+ * while a group is revealing is not hypothetical — it is a reply landing in the
+ * 500 ms after the tap. Giving the entrance its own tag means row churn cannot
+ * cancel it half-open, and clearing the entrance cannot disturb the rows.
+ */
+const ENTER_STYLE_ID = "bb-plugin-sidebar-trim-enter";
 const BUTTON_ATTR = "data-sidebar-trim-expand";
+/**
+ * Shared prefix for the three entrance keyframes, so the disarm watcher can
+ * recognise our own animations among everything else the app runs without
+ * listing them one by one.
+ */
+const ENTER_ANIM_PREFIX = "bb-trim-row-";
 
 /**
  * BB core sets a fixed row height via this custom property (theme.css:
@@ -59,6 +78,48 @@ function staticCss(): string {
           : `transform ${motion.duration.chevronNative}ms ${motion.ease.chevron}`
       } !important;
     }`;
+  // ---------------------------------------------------------------------------
+  // The three clocks a freshly mounted row has to borrow
+  // ---------------------------------------------------------------------------
+  // These live in the STATIC sheet, which is written once and then left alone,
+  // because removing an `@keyframes` rule cancels every animation currently
+  // running from it. Keeping them here means the rows sheet and the entrance
+  // sheet can both churn underneath a reveal without stopping it.
+  //
+  // Each keyframe declares only `from`. The missing `100%` is an *implicit*
+  // keyframe, which resolves to the element's own computed value — so the box
+  // opens to the real `--bb-sidebar-row-height` (28 px measured), the sticky
+  // floor to BB's real `min-height`, and the margin to whatever `space-y-*` BB
+  // happens to be using for that list (2 px in a project list, 1 px in a nested
+  // child list). This is the same "declare the transition, never the value"
+  // trick the reveal rules use below, and it is the reason the entrance needs
+  // no measurement pass and cannot drift from BB's numbers.
+  //
+  // Three separate animations rather than one, because the reveal they are
+  // standing in for is not one move: the box takes 230 ms on the expo-ish
+  // `enter`, the ink is gone in 150 ms so it is finished before the box stops,
+  // and the content takes 260 ms on the balanced `shift` so it settles a beat
+  // *after* its own slot has come to rest. One animation could not hold three
+  // durations and three curves, and flattening them to one is precisely what
+  // makes a multi-row reveal read as a single rigid plate.
+  //
+  // `translateY(-6px)` is not a new value: it is the exact resting transform a
+  // collapsed row is left at by the collapse rule, so a row that mounts already
+  // open starts where a row that was merely hidden would have started. First
+  // expand and second expand are then the same picture, which is the whole
+  // point of this file's entrance.
+  const rowEnterKeyframes = reduced
+    ? ""
+    : `
+    @keyframes ${ENTER_ANIM_PREFIX}box {
+      from { max-height: 0; min-height: 0; margin-block-end: 0; }
+    }
+    @keyframes ${ENTER_ANIM_PREFIX}ink {
+      from { opacity: 0; }
+    }
+    @keyframes ${ENTER_ANIM_PREFIX}lift {
+      from { transform: translateY(-${motion.distance.rowLift}px); }
+    }`;
   return `
     button[${BUTTON_ATTR}] {
       position: relative;
@@ -90,6 +151,7 @@ function staticCss(): string {
       transform: rotate(90deg);
     }
     ${nativeChevron}
+    ${rowEnterKeyframes}
   `;
 }
 
@@ -344,6 +406,396 @@ function wrapperSelectors(escapedId: string): {
  * animatable in the after-change style, so 0 -> BB's number eases instead of
  * snapping, and the plugin never has to know what that number is.
  */
+/**
+ * ---------------------------------------------------------------------------
+ * The compact (mobile) sheet — a different shape, for a measured reason
+ * ---------------------------------------------------------------------------
+ * The desktop sheet below emits one or two rules PER MANAGED ROW, each with a
+ * full transition shorthand. Measured on this machine that is 206 KB and 662
+ * `:has()` selectors — while BB's virtualizer keeps only ~13 thread anchors in
+ * the DOM at a time. On a phone that combination froze the drawer for ~5 s.
+ *
+ * Two things make this variant cheap, both measured in iPhone WebKit:
+ *
+ * 1. ONE rule per concern, with a joined selector list, and only for HIDDEN
+ *    ids. Visible rows need no rule at all once there is no reveal transition
+ *    to declare. 206 KB -> ~20 KB. The `:has()` argument also gets a child
+ *    combinator (`> [data-sidebar-thread-id]`), so matching is a direct-child
+ *    check instead of a descendant search.
+ *
+ * 2. Placeholders are `display:none`, NOT `height:0`. This is the important
+ *    one. BB windows the list with an IntersectionObserver over a 240px band.
+ *    Zero-height placeholders still generate boxes, so ~150 of them stack at
+ *    the same y and ALL intersect that band at once — the virtualizer gives up
+ *    and realizes the lot. `display:none` generates no box, so a hidden row is
+ *    never observed and never realized. Measured over an identical scroll:
+ *
+ *      placeholder rule   max realized   worst frame
+ *      (none)                     56         31 ms
+ *      height:0                   63         65 ms
+ *      display:none               20         30 ms
+ *
+ *    Note this is `display:none` on the PLACEHOLDER, which has no content —
+ *    not on a realized row, which is what blanked the list on iOS in 0f3edb5.
+ *
+ * Placeholders still snap rather than animate, on every path. An empty
+ * off-screen box has nothing to show while it moves, and animating a box the
+ * virtualiser is actively measuring only invites it to re-measure
+ * mid-transition.
+ *
+ * ---------------------------------------------------------------------------
+ * Getting motion back without paying for it a second time
+ * ---------------------------------------------------------------------------
+ * The three constraints above (one rule per concern, hidden-ids-only,
+ * `display:none` placeholders) are unchanged and still explain why this
+ * cannot look like `buildRowRules` with smaller numbers. An earlier version
+ * of this function tried to keep "hidden-ids-only" literally true even for
+ * the reveal side, by declaring the reveal transition ONCE, unconditionally,
+ * on the bare `${HOVER_ROW}` class with no value overrides — relying on the
+ * CSS Transitions spec's after-change-style rule (the same mechanism behind
+ * `.btn{transition:200ms} .btn:hover{transition:80ms}`) to make a row pick up
+ * that transition the instant it stopped matching the hidden selector.
+ *
+ * Frame-by-frame measurement (sampling `getComputedStyle().maxHeight` and
+ * `getBoundingClientRect().height` on every animation frame, not just before/
+ * after) showed that trick only half-worked: opacity and transform genuinely
+ * ramped, but max-height did not move at all. The bare-class rule declared a
+ * transition but no `max-height` value, so the reveal's after-change value
+ * was the browser default, `none` — and `none` is not interpolable with an
+ * explicit length like the hidden rule's `0`. The browser has nothing to
+ * tween between, so it snaps, silently, with no console warning. Padding the
+ * bare class with an explicit `max-height:${ROW_HEIGHT_VAR}` would fix the
+ * interpolation but also apply `overflow:hidden` to every row in the
+ * sidebar, managed or not — verified separately (measuring real hover-action
+ * button boxes) that BB intentionally sizes that cluster a couple of px
+ * taller than some rows for a larger touch target, so a global
+ * `overflow:hidden` would clip it on rows this plugin never trims.
+ *
+ * The fix keeps the "one joined-selector rule, not one per row" budget but
+ * gives up the "zero ids for reveal" idea: reveal gets its own rule, scoped
+ * to the ids it actually applies to. Those ids are the CURRENTLY VISIBLE
+ * managed ones (`managedIds` minus `hiddenIds`) — the few rows each
+ * expandable group still shows above its trim line — mirroring the shape of
+ * `buildRowRules`'s own reveal branch below (same explicit
+ * `max-height:${ROW_HEIGHT_VAR}` target, same property list) but joined into
+ * one rule instead of one per id. This set is bounded by the expand limits
+ * (a handful of rows per expandable group), not by how many threads exist,
+ * so it stays cheap regardless of sidebar size — see the byte/rule numbers
+ * this function's header comment reports after each change.
+ *
+ * Stagger is the one desktop behaviour this shape does not attempt. Desktop's
+ * `nextStaggerIndex` finds each group's row-0 by resetting its counter at
+ * every hidden/visible boundary while walking ALL managed ids in sidebar
+ * order — hidden and visible interleaved. This function only ever sees the
+ * hidden ids, flattened across every group in the sidebar at once, with no
+ * visible ids in between to mark where one group's overflow block ends and
+ * the next begins. A bucketed delay computed from position in that flat list
+ * would hand a group's first collapsing row whatever index it happens to
+ * land on globally, not "0" — a fabricated stagger, not the real one.
+ * Bringing the managed-id walk back in to fix that is exactly the shape
+ * decided against for the placeholder rule above, for the same reason: it
+ * turns a handful of joined-selector rules back into per-row bookkeeping.
+ * And the payoff would be thin regardless, because the virtualizer already
+ * limits how many rows are realized (and therefore paintable) near the
+ * toggle boundary to a handful — most of a big group's rows are
+ * `display:none` placeholders that skip animation entirely, per the note
+ * above. A stagger is choreography for a crowd; there usually isn't one
+ * here. Both directions move together instead — simpler, correct, and
+ * consistent with this skill's own instruction to remove decoration that
+ * doesn't have room to read as an idea.
+ *
+ * Reduced motion keeps every property change instant on both directions, as
+ * before — see `prefersReducedMotion()`.
+ */
+function buildCompactRowRules(
+  managedIds: Iterable<string>,
+  hiddenIds: ReadonlySet<string>,
+): string {
+  const reduced = prefersReducedMotion();
+  const parts: string[] = [];
+
+  if (!reduced) {
+    // Reveal, scoped to the ids it actually affects — see the header note
+    // above for why the earlier zero-id bare-class version silently failed
+    // to animate height. `visible` is bounded by each expandable group's
+    // limit (a handful of rows), not by sidebar size, so joining it into one
+    // rule stays cheap even when hiddenIds is in the hundreds.
+    const visible = [...managedIds].filter((id) => !hiddenIds.has(id));
+    if (visible.length > 0) {
+      const revealSelector = visible
+        .map((id) => `${HOVER_ROW}:has(> [data-sidebar-thread-id="${CSS.escape(id)}"])`)
+        .join(",");
+      parts.push(
+        `${revealSelector}{overflow:hidden;` +
+          // `!important` here is load-bearing, not decoration — see the
+          // measured note above `collapseTransition` below for why: icandy
+          // declares `transition-property`/`-duration`/`-timing-function` as
+          // plain (non-important) longhands on `.bb-sidebar-hover-actions-row`
+          // at specificity (0,4,0), which otherwise beats this rule's (0,2,0)
+          // outright and silently drops max-height/min-height/margin-block-
+          // end/transform from the element's transition list.
+          `transition:max-height ${motion.duration.revealMax}ms ${motion.ease.enter},` +
+          `min-height ${motion.duration.revealMax}ms ${motion.ease.enter},` +
+          `margin-block-end ${motion.duration.revealMax}ms ${motion.ease.enter},` +
+          `opacity ${motion.duration.revealFade}ms ${motion.ease.fade},` +
+          `transform ${motion.duration.revealShift}ms ${motion.ease.shift},` +
+          `${ICANDY_INTERACTION_TRANSITION}!important;` +
+          `max-height:${ROW_HEIGHT_VAR};opacity:1;transform:translateY(0)}`,
+      );
+    }
+  }
+
+  const hidden = [...hiddenIds];
+  if (hidden.length === 0) return parts.join("\n");
+
+  const rowSelector = hidden
+    .map((id) => `${HOVER_ROW}:has(> [data-sidebar-thread-id="${CSS.escape(id)}"])`)
+    .join(",");
+  // The wrapper carries BB's `space-y-*` rhythm; without this a collapsed row
+  // still leaves its margin behind. Same `:not([class*="space-y"])` guard as
+  // the desktop path — see wrapperSelectors. Deliberately no transition here
+  // even though the rest of this function now animates: the value in play is
+  // BB's 1-2px row-rhythm margin, which reads identically snapped or eased,
+  // and giving it a reveal-side rule would need the same managed-id walk
+  // this function avoids above, to save a difference nobody can see.
+  const wrapperSelector = hidden
+    .map(
+      (id) =>
+        `div:not([class*="space-y"]):has(> * > ${HOVER_ROW} > [data-sidebar-thread-id="${CSS.escape(id)}"])`,
+    )
+    .join(",");
+  const placeholderSelector = hidden
+    .map((id) => `[${WINDOWED_NAV_ATTR}^="${cssString(id)}:"]`)
+    .join(",");
+  // `!important` on both branches below for the same reason as the reveal
+  // rule above: measured live in this workspace, icandy ships
+  // `:root.icandy-active .bb-sidebar-hover-actions-row(.icandy-control)`
+  // rules that set `transition-property`/`-duration`/`-timing-function` as
+  // plain longhands at specificity (0,4,0) — higher than this rule's
+  // `:has()` selector at (0,2,0) — and win the cascade for those properties
+  // outright (longhands don't merge across rules; highest specificity takes
+  // the whole list). Confirmed via `getComputedStyle(row).transitionProperty`
+  // reporting icandy's own list (background-color, color, scale, translate,
+  // opacity, filter) instead of this rule's, with max-height absent from it
+  // — so max-height/min-height/margin-block-end/transform silently never
+  // transitioned even though every value and selector here was correct.
+  // opacity happened to appear on both lists, which is why it alone still
+  // animated (on icandy's timing, not this rule's) and made the bug easy to
+  // miss from opacity-only frame sampling. icandy's own reduced-motion
+  // override uses the same `!important` pattern already, so this matches an
+  // existing convention rather than introducing a new one.
+  const collapseTransition = reduced
+    ? "transition:none!important;"
+    : `transition:max-height ${motion.duration.collapseMax}ms ${motion.ease.exit},` +
+      `min-height ${motion.duration.collapseMax}ms ${motion.ease.exit},` +
+      `margin-block-end ${motion.duration.collapseMax}ms ${motion.ease.exit},` +
+      `opacity ${motion.duration.collapseFade}ms ${motion.ease.exit},` +
+      `transform ${motion.duration.collapseShift}ms ${motion.ease.exit},` +
+      `${ICANDY_INTERACTION_TRANSITION}!important;`;
+  // Matches desktop's collapse: content leads (lifts) while the box
+  // (max-height) follows, nothing overshoots on the way out. Skipped under
+  // reduced motion — there is no settle to be honest about when the row is
+  // about to vanish in one frame.
+  const collapseLift = reduced
+    ? ""
+    : `;transform:translateY(-${motion.distance.rowLift}px)`;
+  parts.push(
+    `${rowSelector}{overflow:hidden;pointer-events:none;${collapseTransition}` +
+      `max-height:0;min-height:0;margin-block-end:0;opacity:0${collapseLift}}`,
+    `${wrapperSelector}{margin-block-end:0}`,
+    `${placeholderSelector}{display:none!important}`,
+  );
+  return parts.join("\n");
+}
+
+/**
+ * ---------------------------------------------------------------------------
+ * Why the first expand of a group popped and the second one animated
+ * ---------------------------------------------------------------------------
+ * Reported as "the animation doesn't always play, only the second time I expand
+ * a thread group". Measured, per revealed row, on an iPhone-13 WebKit build
+ * (/tmp/bbrepro/perrow.mjs), counting for every newly-revealed row whether a
+ * `max-height` transition was ever `running` on it:
+ *
+ *     chevron#0 pass1: 11/11 animated      chevron#0 pass2: 11/11 animated
+ *     chevron#1 pass1:  0/14 animated      chevron#1 pass2:  3/14 animated
+ *     chevron#2 pass1:  0/32 animated      chevron#2 pass2:  9/12 animated
+ *     chevron#3 pass1:  0/14 animated      chevron#3 pass2:  2/14 animated
+ *
+ * The compact sheet was not at fault and neither were its tokens. The rows were
+ * never there to transition. `buildCompactRowRules` hides a trimmed row's
+ * windowed placeholder with `display:none`, which is the whole reason the
+ * virtualizer stays healthy (see its header note) — and a `display:none`
+ * placeholder is one BB has never realized. Expanding un-hides it, the
+ * IntersectionObserver picks it up, and BB mounts a *brand new* row element. A
+ * CSS transition needs a before-change style to interpolate from; an element
+ * that did not exist one frame ago has none, so `max-height` cannot tween and
+ * the row simply appears. Second expand animates because by then the rows are
+ * in the DOM. Group #0 always animated because it sits at the top of the list
+ * and the virtualizer had realized it before the first tap.
+ *
+ * Measured on the same expand (MutationObserver on the sidebar subtree): 18
+ * rows mounted, every one of them inside a `[data-sidebar-windowed-item]`,
+ * spread from 20 ms to 299 ms after the tap. Nothing about that is fixable from
+ * the transition side.
+ *
+ * A CSS *animation*, unlike a transition, does play on a newly inserted
+ * element — it needs no previous value, only keyframes. So the entrance is an
+ * animation, `bb-trim-row-box` / `-ink` / `-lift` (declared in `staticCss`),
+ * carrying the reveal transition's own three durations and three curves so a
+ * mounted row and a merely-hidden row arrive identically.
+ *
+ * ---------------------------------------------------------------------------
+ * The part that is easy to get catastrophically wrong
+ * ---------------------------------------------------------------------------
+ * An animation fires whenever a matching element is inserted. Left armed, this
+ * rule would animate every row the virtualizer realizes while the user is
+ * merely *scrolling* — which is not a hypothetical regression, it is icandy's
+ * per-row mount animation, the exact thing that made this sidebar unusable on a
+ * phone before the compact sheet existed. Two independent scopes keep it to the
+ * event it belongs to:
+ *
+ *  1. WHICH ROWS. The selector lists only the ids that just stopped being
+ *     hidden — the diff of `hiddenIds` across one expand, computed in app.tsx.
+ *     That is the group whose chevron was tapped and nothing else: rows in
+ *     other groups, and the handful in this group that were visible all along,
+ *     match no selector and cannot animate. Scoping by an ancestor flag instead
+ *     would have re-animated those already-visible rows, collapsing them to 0
+ *     and re-opening them — a flash, for rows nothing happened to.
+ *
+ *  2. FOR HOW LONG. This rule lives in its own style tag, which is emptied
+ *     again once the reveal is over (`disarmRowEntrance`), so scrolling back
+ *     through the same group later finds no rule at all. See
+ *     `motion.revealWindow` for the arm/idle/max envelope and the measurement
+ *     behind it.
+ *
+ * Cost: one rule, one selector per revealed row, bounded by the expanded
+ * group's overflow (11-32 in the measurements above) and present only during
+ * the window — and it is money the hidden-row rule gives back at the same
+ * moment, since those ids leave `hiddenIds` as they enter this list. The rows
+ * sheet the perf gate measures is untouched at 4 rules.
+ *
+ * `!important` for the same reason as every other property this file animates
+ * on these rows: icandy declares its motion as longhands at a specificity this
+ * `:has()` selector cannot reach, and a dropped `animation-name` would fail the
+ * way the dropped `transition-property` did — silently, and looking exactly
+ * like the bug this function exists to fix. Measured today a managed row
+ * computes `animation-name: none`, so nothing is being overridden; the marker
+ * is there so a future icandy release cannot quietly take the entrance back.
+ */
+function buildRowEntranceRule(enteringIds: readonly string[]): string {
+  const selector = enteringIds
+    .map(
+      (id) => `${HOVER_ROW}:has(> [data-sidebar-thread-id="${CSS.escape(id)}"])`,
+    )
+    .join(",");
+  // `backwards` fill only. `forwards` would hold the implicit end value after
+  // the run, and an implicit end value is a snapshot of the row's computed
+  // style — so a collapse arriving inside the window would have been pinned
+  // open by a finished animation until this tag was cleared. Backwards costs
+  // nothing and removes any chance of the row being painted at its full height
+  // for one frame before the first sample lands.
+  return (
+    `${selector}{animation:` +
+    `${ENTER_ANIM_PREFIX}box ${motion.duration.revealMax}ms ${motion.ease.enter} backwards,` +
+    `${ENTER_ANIM_PREFIX}ink ${motion.duration.revealFade}ms ${motion.ease.fade} backwards,` +
+    `${ENTER_ANIM_PREFIX}lift ${motion.duration.revealShift}ms ${motion.ease.shift} backwards` +
+    `!important}`
+  );
+}
+
+let enterIdleTimer = 0;
+let enterHardTimer = 0;
+let enterWatching = false;
+
+/**
+ * Re-arms the idle timer on any entrance animation starting or ending.
+ *
+ * Both events, not just `animationend`: a row that mounts 299 ms after the tap
+ * (measured, see above) would otherwise have its 260 ms lift torn out by an
+ * idle timer set before it existed. `animationstart` pushes the window forward
+ * the moment a late row appears, and its `animationend` pushes it once more, so
+ * no row is ever cancelled part-open. The hard cap is deliberately not
+ * refreshed here — that is what stops a scroll through a still-mounting group
+ * from keeping the entrance armed forever.
+ */
+function onEnterActivity(event: AnimationEvent): void {
+  if (!event.animationName.startsWith(ENTER_ANIM_PREFIX)) return;
+  window.clearTimeout(enterIdleTimer);
+  enterIdleTimer = window.setTimeout(
+    disarmRowEntrance,
+    motion.revealWindow.idle,
+  );
+}
+
+/**
+ * Ends the reveal window: no rule, no listener, no timers. Emptying the tag
+ * cancels anything still running from it, which is why every path into here is
+ * either "nothing has run for `idle` ms" or the hard cap.
+ */
+function disarmRowEntrance(): void {
+  window.clearTimeout(enterIdleTimer);
+  enterIdleTimer = 0;
+  window.clearTimeout(enterHardTimer);
+  enterHardTimer = 0;
+  if (enterWatching) {
+    document.removeEventListener("animationstart", onEnterActivity, true);
+    document.removeEventListener("animationend", onEnterActivity, true);
+    enterWatching = false;
+  }
+  const tag = document.getElementById(ENTER_STYLE_ID);
+  if (tag && tag.textContent) tag.textContent = "";
+}
+
+/**
+ * Arms the mount entrance for one expand.
+ *
+ * Call it with the ids that just left `hiddenIds`. An empty list is a no-op,
+ * NOT a disarm, and the difference is load-bearing: the rows effect re-runs for
+ * every reason the thread list changes, and a thread list that changes 200 ms
+ * into a reveal is an ordinary Tuesday. Treating "nothing is entering" as
+ * "stop" made a reply landing mid-expand cancel the expand's animations
+ * half-open. The window only ever ends on its own timers, which is also what
+ * keeps it honest — nothing can extend it either.
+ *
+ * The one case that does cut a reveal short is a second chevron tapped inside
+ * the window: rewriting this tag re-parses it and takes the first group's
+ * running animations with it, wherever they had got to. Left as is on purpose.
+ * A union of both id sets would not help — the re-parse cancels everything in
+ * the tag regardless of which selectors still match — and by then the first
+ * group is most of the way open, while the second tap is itself the thing the
+ * eye has moved to.
+ *
+ * Compact only, and never under reduced motion: the whole point is a CSS
+ * animation, and someone who asked for no motion must get none created at all,
+ * not a fast one. Desktop keeps `buildRowRules` byte-for-byte as it was.
+ */
+export function applyRowEntranceStylesheet(
+  enteringIds: readonly string[],
+  compact: boolean,
+): void {
+  if (enteringIds.length === 0) return;
+  if (!compact || prefersReducedMotion()) {
+    disarmRowEntrance();
+    return;
+  }
+  ensureStyleTag(ENTER_STYLE_ID).textContent =
+    buildRowEntranceRule(enteringIds);
+  if (!enterWatching) {
+    document.addEventListener("animationstart", onEnterActivity, true);
+    document.addEventListener("animationend", onEnterActivity, true);
+    enterWatching = true;
+  }
+  // `arm` rather than `idle` for the opening timer: nothing has animated yet,
+  // and a group expanded entirely below the fold may never animate at all —
+  // its rows stay unrealized placeholders until a later scroll, which must not
+  // find this rule still in place.
+  window.clearTimeout(enterIdleTimer);
+  enterIdleTimer = window.setTimeout(disarmRowEntrance, motion.revealWindow.arm);
+  window.clearTimeout(enterHardTimer);
+  enterHardTimer = window.setTimeout(disarmRowEntrance, motion.revealWindow.max);
+}
+
 function buildRowRules(
   managedIds: Iterable<string>,
   hiddenIds: ReadonlySet<string>,
@@ -494,16 +946,20 @@ export function applyHideStylesheet(
   const key = `${[...managedIds].sort().join("\0")}|${[...hiddenIds].sort().join("\0")}|${prefersReducedMotion() ? 1 : 0}|${compact ? 1 : 0}`;
   if (key === lastHideKey) return;
   lastHideKey = key;
-  ensureStyleTag(ROWS_STYLE_ID).textContent = buildRowRules(
-    managedIds,
-    hiddenIds,
-    compact,
-  );
+  ensureStyleTag(ROWS_STYLE_ID).textContent = compact
+    ? buildCompactRowRules(managedIds, hiddenIds)
+    : buildRowRules(managedIds, hiddenIds, compact);
 }
 
 export function clearHideStylesheet(): void {
   lastHideKey = "";
   lastStaticKey = "";
+  // Before the tags go: `disarmRowEntrance` also drops the document-level
+  // animation listeners and the two timers, which would otherwise outlive the
+  // overlay and fire `document.getElementById` against a tag that no longer
+  // exists on every unmount.
+  disarmRowEntrance();
+  document.getElementById(ENTER_STYLE_ID)?.remove();
   document.getElementById(ROWS_STYLE_ID)?.remove();
   document.getElementById(STATIC_STYLE_ID)?.remove();
 }

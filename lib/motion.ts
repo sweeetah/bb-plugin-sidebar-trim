@@ -122,8 +122,16 @@ export const motion = {
      * dragged.
      */
     collapseShift: 150,
-    /** Mobile-only: one-shot fade for a freshly mounted row or the list itself. */
-    mobileEnter: 220,
+    // There is deliberately no separate "freshly mounted row" duration here.
+    // A short-lived `mobileEnter: 220` used to sit in this slot, reserved for
+    // exactly that case and never wired up. When the mount entrance was finally
+    // built (see `bb-trim-row-*` in lib/stylesheet.ts) it turned out the one
+    // thing it must NOT have is a duration of its own: the entrance exists so
+    // that the first expand of a group is indistinguishable from the second,
+    // and the second is driven by the reveal transition above. A 220ms box
+    // against the transition's 230ms would have made "did it animate this
+    // time?" answerable by eye — which is the bug, restated politely. The
+    // entrance reuses revealMax / revealFade / revealShift verbatim.
   },
   ease: {
     /**
@@ -180,6 +188,48 @@ export const motion = {
      */
     collapseCap: 40,
     collapseFalloff: 2.5,
+  },
+  /**
+   * How long "this group is revealing right now" stays true.
+   *
+   * The mount entrance (lib/stylesheet.ts, `applyRowEntranceStylesheet`) is a
+   * CSS *animation*, and an animation fires whenever a matching element is
+   * inserted — including when the virtualizer realizes a row under a finger
+   * that is merely scrolling. An entrance that is always armed is the icandy
+   * per-row mount animation that made this sidebar unusable on a phone in the
+   * first place. So the entrance is an event with a start and an end, not a
+   * mode, and these three numbers are its envelope.
+   *
+   * Measured on an iPhone-13 WebKit expand of the big project group: the first
+   * revealed row mounts 20 ms after the tap, and the rest arrive in one batch
+   * that has landed anywhere between 299 ms and 355 ms across runs, as the
+   * IntersectionObserver works through the placeholders the expand just un-hid.
+   * That spread is the number `arm` has to survive, and it is why an earlier
+   * 420 ms here was wrong: it cleared the measured worst case by 65 ms, which
+   * is a gate that passes on this machine and pops on a slower phone.
+   *
+   * - `arm` covers that burst from a standing start, with room for the latency
+   *   to roughly double. Its cost is close to nothing, which is the part worth
+   *   understanding: if no row mounts inside the window then by definition
+   *   nothing animated in it. All `arm` really decides is whether a row of the
+   *   *tapped* group that arrives late still gets its entrance — and it should.
+   *   No other group's rows can animate at any point, because the rule names
+   *   ids, not a region.
+   * - `idle` re-arms on every entrance animation that starts or ends, so a
+   *   realization burst that runs long keeps the window open while it is
+   *   genuinely still revealing. 180 ms is comfortably under the 230 ms box so
+   *   a row that starts late still gets its full run before anything is torn
+   *   down.
+   * - `max` is the hard stop. Without it, scrolling *through* a group that is
+   *   still mounting rows would refresh `idle` indefinitely and the entrance
+   *   would quietly become the mode it is not allowed to be. It has to clear
+   *   `arm` plus one full `revealShift` (700 + 260) so the stop can never land
+   *   on a row that is still opening.
+   */
+  revealWindow: {
+    arm: 700,
+    idle: 180,
+    max: 1400,
   },
 } as const;
 
