@@ -19,6 +19,10 @@ import {
 } from "@get-bb/plugin-sdk/app";
 import { TrimThreadList } from "./components/CompactTrimList";
 import {
+  type AutoCollapseController,
+  mountAutoCollapse,
+} from "./lib/autoCollapse";
+import {
   findSidebarRoot,
   findSidebarScrollTarget,
 } from "./lib/dom";
@@ -43,6 +47,13 @@ import {
   type TrimGroupKey,
 } from "./lib/trim";
 import { useCompactViewport } from "./lib/viewport";
+
+function parseFlag(value: unknown, fallback: boolean): boolean {
+  if (typeof value === "boolean") return value;
+  if (value === "true") return true;
+  if (value === "false") return false;
+  return fallback;
+}
 
 function parseLimit(value: unknown, fallback: number): number {
   const n = typeof value === "number" ? value : Number(value);
@@ -190,6 +201,35 @@ function SidebarTrimOverlay() {
   return null;
 }
 
+/**
+ * Couples the two panels: the right panel taking the width is the moment the
+ * sidebar is least useful. Kept out of the trim overlay because it observes
+ * the whole document, not the thread list, and must survive the overlay's
+ * thread-driven re-renders.
+ */
+function SidebarAutoCollapse() {
+  const settings = useSettings();
+  const enabled = parseFlag(settings.values?.autoCollapseSidebar, true);
+  const controllerRef = useRef<AutoCollapseController | null>(null);
+  const enabledRef = useRef(enabled);
+  enabledRef.current = enabled;
+
+  useEffect(() => {
+    const controller = mountAutoCollapse(enabledRef.current);
+    controllerRef.current = controller;
+    return () => {
+      controllerRef.current = null;
+      controller.dispose();
+    };
+  }, []);
+
+  useEffect(() => {
+    controllerRef.current?.setEnabled(enabled);
+  }, [enabled]);
+
+  return null;
+}
+
 function LimitsHelp() {
   return (
     <p style={{ margin: 0, fontSize: 14, opacity: 0.8 }}>
@@ -213,6 +253,11 @@ export default definePluginApp((app) => {
   app.slots.experimental_appOverlay({
     id: "sidebar-trim",
     component: SidebarTrimOverlay,
+  });
+
+  app.slots.experimental_appOverlay({
+    id: "sidebar-auto-collapse",
+    component: SidebarAutoCollapse,
   });
 
   app.slots.settingsSection({

@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-sidebar-trim",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -9,7 +9,7 @@
   },
   "bb": {
     "name": "Sidebar Trim",
-    "description": "Keeps the sidebar tidy: three latest threads per worktree and 24 in Threads, with a hover expand control. Hidden threads stay available — nothing is archived.",
+    "description": "Keeps the sidebar tidy: three latest threads per worktree and 24 in Threads, with a hover expand control, and collapses the sidebar while the right panel is open. Hidden threads stay available — nothing is archived.",
     "branding": {
       "icon": "ListFilter"
     },
